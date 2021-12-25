@@ -1,3 +1,7 @@
+#include "linux/err.h"
+#include "linux/kernel.h"
+#include "linux/printk.h"
+#include "linux/stddef.h"
 #include "linux/types.h"
 #include <linux/interrupt.h>
 #include <linux/ioctl.h>
@@ -11,20 +15,22 @@
 #include <linux/string.h>
 #include <linux/usb.h>
 
+#include <linux/power_supply.h>
+
 // Original module that this one is based on:
 // https://github.com/suhitsinha/Kernel-Device-Driver-for-Arduino
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Lapekko battery driver");
 
 static ssize_t dev_file_write(struct file *f, const char __user *buf,
-                             size_t count, loff_t *off);
+                              size_t count, loff_t *off);
 static int dev_file_open(struct inode *inode, struct file *file);
 static int dev_file_release(struct inode *inode, struct file *file);
 static ssize_t dev_file_read(struct file *file, char __user *buf, size_t count,
-                            loff_t *off);
+                             loff_t *off);
 
 /* Global Variable Declarations */
-//TODO: maybe remove them?
+// TODO: maybe remove them?
 void *buff = NULL;
 void *safe_dev = NULL;
 int count_actual_read_len = 0;
@@ -61,7 +67,7 @@ static void arduino_delete(void) {
     return;
 }
 
-static struct file_operations arduino_fops = {
+static struct file_operations dev_fops = {
     .owner = THIS_MODULE,
     .write = dev_file_write,
     .read = dev_file_read,
@@ -71,7 +77,7 @@ static struct file_operations arduino_fops = {
 
 static struct usb_class_driver arduino_class = {
     .name = "ard%d",
-    .fops = &arduino_fops,
+    .fops = &dev_fops,
     .minor_base = 0,
 };
 
@@ -86,7 +92,7 @@ static void usb_write_callback(struct urb *submit_urb) {
 }
 
 static ssize_t dev_file_read(struct file *f, char __user *buf, size_t len,
-                            loff_t *off) {
+                             loff_t *off) {
     int retval;
 
     struct usb_arduino *mydev = safe_dev;
@@ -116,7 +122,7 @@ static ssize_t dev_file_read(struct file *f, char __user *buf, size_t len,
 }
 
 static ssize_t dev_file_write(struct file *f, const char __user *buf,
-                             size_t count, loff_t *off) {
+                              size_t count, loff_t *off) {
     int retval;
     struct usb_arduino *mydev = safe_dev;
     struct usb_device *dev = mydev->udev;
@@ -303,15 +309,115 @@ static struct usb_driver arduino_driver = {
     .disconnect = arduino_disconnect,
 };
 
-static int __init myModuleInit(void) {
-    int regResult;
-    regResult = usb_register(&arduino_driver);
+static struct power_supply *lapekko_power_supply;
 
-    if (regResult) {
+static enum power_supply_property lapekko_power_battery_props[] = {
+	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_HEALTH,
+	POWER_SUPPLY_PROP_PRESENT,
+	POWER_SUPPLY_PROP_TECHNOLOGY,
+	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+	POWER_SUPPLY_PROP_CHARGE_FULL,
+	POWER_SUPPLY_PROP_CHARGE_NOW,
+	POWER_SUPPLY_PROP_CHARGE_COUNTER,
+	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
+	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
+	POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
+	POWER_SUPPLY_PROP_MODEL_NAME,
+	POWER_SUPPLY_PROP_MANUFACTURER,
+	POWER_SUPPLY_PROP_TEMP,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_CURRENT_NOW,
+}
+;
+static int lapekko_power_get_battery_property(struct power_supply *psy,
+					   enum power_supply_property psp,
+					   union power_supply_propval *val)
+{
+	switch (psp) {
+	case POWER_SUPPLY_PROP_MODEL_NAME:
+		val->strval = "Lapekko battery";
+		break;
+	case POWER_SUPPLY_PROP_MANUFACTURER:
+		val->strval = "Pekkorp";
+		break;
+	case POWER_SUPPLY_PROP_STATUS:
+		val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+		break;
+	case POWER_SUPPLY_PROP_HEALTH:
+		val->intval = POWER_SUPPLY_HEALTH_UNKNOWN;
+		break;
+	case POWER_SUPPLY_PROP_PRESENT:
+		val->intval = 1;
+		break;
+	case POWER_SUPPLY_PROP_TECHNOLOGY:
+		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
+		break;
+	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
+		val->intval = POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
+		break;
+	case POWER_SUPPLY_PROP_CAPACITY:
+	case POWER_SUPPLY_PROP_CHARGE_NOW:
+		val->intval = 50; // in percents
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
+		val->intval = -1000;
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
+		val->intval = 100;
+		break;
+	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG:
+	case POWER_SUPPLY_PROP_TIME_TO_FULL_NOW:
+		val->intval = 3600;
+		break;
+	case POWER_SUPPLY_PROP_TEMP:
+		val->intval = 26;
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		val->intval = 3300000;
+		break;
+	case POWER_SUPPLY_PROP_CURRENT_NOW:
+		val->intval = -1600;
+		break;
+	default:
+		pr_info("%s: some properties deliberately report errors.\n",
+			__func__);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static const struct power_supply_desc lapekko_power_desc = {
+    .name = "lapekko_battery",
+    .type = POWER_SUPPLY_TYPE_BATTERY,
+    .properties = lapekko_power_battery_props,
+    .num_properties = ARRAY_SIZE(lapekko_power_battery_props),
+    .get_property = lapekko_power_get_battery_property};
+
+static const struct power_supply_config lapekko_power_config = {
+
+};
+
+static int __init myModuleInit(void) {
+    int ret;
+    ret = usb_register(&arduino_driver);
+
+    if (ret) {
         printk(KERN_ERR
                "Failed to register the Arduino device with error code %d\n",
-               regResult);
+               ret);
         return 0;
+    }
+
+    lapekko_power_supply =
+        power_supply_register(NULL, &lapekko_power_desc, &lapekko_power_config);
+    if (IS_ERR(lapekko_power_supply)) {
+        pr_err("%s: failed to register: %s\n", __func__,
+               lapekko_power_desc.name);
+        power_supply_unregister(lapekko_power_supply);
+        return PTR_ERR(lapekko_power_supply);
     }
 
     return 0;
@@ -319,6 +425,7 @@ static int __init myModuleInit(void) {
 
 static void __exit myModuleExit(void) {
     usb_deregister(&arduino_driver);
+    power_supply_unregister(lapekko_power_supply);
 }
 
 module_init(myModuleInit);
