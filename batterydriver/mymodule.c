@@ -1,4 +1,5 @@
 #include "linux/err.h"
+#include "linux/gfp.h"
 #include "linux/kernel.h"
 #include "linux/printk.h"
 #include "linux/stddef.h"
@@ -34,6 +35,7 @@ static ssize_t dev_file_read(struct file *file, char __user *buf, size_t count,
 void *buff = NULL;
 void *safe_dev = NULL;
 int count_actual_read_len = 0;
+static bool arduino_connected = false;
 
 /* Global Structure Definition to store the information about a USB device */
 struct usb_arduino {
@@ -129,7 +131,7 @@ static ssize_t dev_file_write(struct file *f, const char __user *buf,
 
     printk(KERN_DEBUG "Arduino Message: Inside write function.\n");
 
-    buff = kmalloc(128, GFP_KERNEL);
+    buff = kmalloc(128, GFP_KERNEL); //TODO: free it in case of an error
     if (copy_from_user(buff, buf, count)) {
         printk(KERN_ERR "Error: Could not read user data!\n");
         return -1;
@@ -281,6 +283,7 @@ static int arduino_probe(struct usb_interface *interface,
 
     dev->minor = interface->minor;
 
+    arduino_connected = true;
     printk(KERN_INFO "USB Arduino device now attached to /dev/ard%d\n",
            interface->minor - 0);
 
@@ -299,6 +302,7 @@ static void arduino_disconnect(struct usb_interface *interface) {
     arduino_delete();
     usb_deregister_dev(interface, &arduino_class);
 
+    arduino_connected = false;
     printk(KERN_INFO "Disconnecting Arduino. Minor: %d", minor);
 }
 
@@ -312,81 +316,111 @@ static struct usb_driver arduino_driver = {
 static struct power_supply *lapekko_power_supply;
 
 static enum power_supply_property lapekko_power_battery_props[] = {
-	POWER_SUPPLY_PROP_STATUS,
-	POWER_SUPPLY_PROP_HEALTH,
-	POWER_SUPPLY_PROP_PRESENT,
-	POWER_SUPPLY_PROP_TECHNOLOGY,
-	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
-	POWER_SUPPLY_PROP_CHARGE_FULL,
-	POWER_SUPPLY_PROP_CHARGE_NOW,
-	POWER_SUPPLY_PROP_CHARGE_COUNTER,
-	POWER_SUPPLY_PROP_CAPACITY,
-	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
-	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
-	POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
-	POWER_SUPPLY_PROP_MODEL_NAME,
-	POWER_SUPPLY_PROP_MANUFACTURER,
-	POWER_SUPPLY_PROP_TEMP,
-	POWER_SUPPLY_PROP_VOLTAGE_NOW,
-	POWER_SUPPLY_PROP_CURRENT_NOW,
+    POWER_SUPPLY_PROP_STATUS,
+    POWER_SUPPLY_PROP_HEALTH,
+    POWER_SUPPLY_PROP_PRESENT,
+    POWER_SUPPLY_PROP_TECHNOLOGY,
+    POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+    POWER_SUPPLY_PROP_CHARGE_FULL,
+    POWER_SUPPLY_PROP_CHARGE_NOW,
+    POWER_SUPPLY_PROP_CHARGE_COUNTER,
+    POWER_SUPPLY_PROP_CAPACITY,
+    POWER_SUPPLY_PROP_CAPACITY_LEVEL,
+    POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
+    POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
+    POWER_SUPPLY_PROP_MODEL_NAME,
+    POWER_SUPPLY_PROP_MANUFACTURER,
+    POWER_SUPPLY_PROP_VOLTAGE_NOW,
+    POWER_SUPPLY_PROP_CURRENT_NOW,
+};
+
+static int get_value_from_arduino(char id) {
+    if (!arduino_connected) {
+        return -1;
+    }
+
+    int retval;
+    struct usb_arduino *mydev = safe_dev;
+    struct usb_device *dev = mydev->udev;
+    //buff = kmalloc(1, GFP_KERNEL); //TODO: free it in case of an error
+    //buff[0] = id;
+
+    usb_fill_bulk_urb(
+        mydev->bulk_out_urb, dev,
+        usb_sndbulkpipe(dev, (unsigned int)mydev->bulk_out_endpoint->bEndpointAddress), &id,
+        1, usb_write_callback, dev);
+    retval = usb_submit_urb(mydev->bulk_out_urb, GFP_KERNEL);
+    if (retval) {
+        return -2;
+    }
+
+    retval = usb_bulk_msg(
+        dev, usb_rcvbulkpipe(dev, (unsigned int)mydev->bulk_in_endpoint->bEndpointAddress),
+        mydev->bulk_in_buffer, 1, &count_actual_read_len, 4000);
+    printk(KERN_DEBUG "Actual length: %d\n", count_actual_read_len);
+    if (retval) {
+        printk(KERN_ERR "Error: Could not submit Read URB. RetVal: %d\n",
+               retval);
+        return -3;
+    }
+
+    //kfree(buff);
+    return mydev->bulk_in_buffer[0];
 }
-;
+
 static int lapekko_power_get_battery_property(struct power_supply *psy,
-					   enum power_supply_property psp,
-					   union power_supply_propval *val)
-{
-	switch (psp) {
-	case POWER_SUPPLY_PROP_MODEL_NAME:
-		val->strval = "Lapekko battery";
-		break;
-	case POWER_SUPPLY_PROP_MANUFACTURER:
-		val->strval = "Pekkorp";
-		break;
-	case POWER_SUPPLY_PROP_STATUS:
-		val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-		break;
-	case POWER_SUPPLY_PROP_HEALTH:
-		val->intval = POWER_SUPPLY_HEALTH_UNKNOWN;
-		break;
-	case POWER_SUPPLY_PROP_PRESENT:
-		val->intval = 1;
-		break;
-	case POWER_SUPPLY_PROP_TECHNOLOGY:
-		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
-		break;
-	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
-		val->intval = POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
-		break;
-	case POWER_SUPPLY_PROP_CAPACITY:
-	case POWER_SUPPLY_PROP_CHARGE_NOW:
-		val->intval = 50; // in percents
-		break;
-	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
-		val->intval = -1000;
-		break;
-	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
-	case POWER_SUPPLY_PROP_CHARGE_FULL:
-		val->intval = 100;
-		break;
-	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG:
-	case POWER_SUPPLY_PROP_TIME_TO_FULL_NOW:
-		val->intval = 3600;
-		break;
-	case POWER_SUPPLY_PROP_TEMP:
-		val->intval = 26;
-		break;
-	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-		val->intval = 3300000;
-		break;
-	case POWER_SUPPLY_PROP_CURRENT_NOW:
-		val->intval = -1600;
-		break;
-	default:
-		pr_info("%s: some properties deliberately report errors.\n",
-			__func__);
-		return -EINVAL;
-	}
-	return 0;
+                                              enum power_supply_property psp,
+                                              union power_supply_propval *val) {
+    switch (psp) {
+    case POWER_SUPPLY_PROP_MODEL_NAME:
+        val->strval = "Lapekko battery";
+        break;
+    case POWER_SUPPLY_PROP_MANUFACTURER:
+        val->strval = "Pekkorp";
+        break;
+    case POWER_SUPPLY_PROP_STATUS:
+        val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+        break;
+    case POWER_SUPPLY_PROP_HEALTH:
+        val->intval = POWER_SUPPLY_HEALTH_UNKNOWN;
+        break;
+    case POWER_SUPPLY_PROP_PRESENT:
+        val->intval = 1;
+        break;
+    case POWER_SUPPLY_PROP_TECHNOLOGY:
+        val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
+        break;
+    case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
+        val->intval = POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
+        break;
+    case POWER_SUPPLY_PROP_CAPACITY:
+    case POWER_SUPPLY_PROP_CHARGE_NOW:
+        val->intval = 50; // in percents
+        break;
+    case POWER_SUPPLY_PROP_CHARGE_COUNTER:
+        val->intval = -1000;
+        break;
+    case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+    case POWER_SUPPLY_PROP_CHARGE_FULL:
+        val->intval = 100;
+        break;
+    case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG:
+    case POWER_SUPPLY_PROP_TIME_TO_FULL_NOW:
+        val->intval = 3600;
+        break;
+    case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+        val->intval = get_value_from_arduino('2');
+        // val->intval = 3300000; // lets say this is accessed by command '1'
+        // (49) in arduino serial
+        break;
+    case POWER_SUPPLY_PROP_CURRENT_NOW:
+        val->intval = -1600;
+        break;
+    default:
+        pr_info("%s: some properties deliberately report errors.\n", __func__);
+        return -EINVAL;
+    }
+    return 0;
 }
 
 static const struct power_supply_desc lapekko_power_desc = {
