@@ -26,20 +26,6 @@
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Lapekko battery driver");
 
-static ssize_t dev_file_write(struct file *f, const char __user *buf,
-                              size_t count, loff_t *off);
-static int dev_file_open(struct inode *inode, struct file *file);
-static int dev_file_release(struct inode *inode, struct file *file);
-static ssize_t dev_file_read(struct file *file, char __user *buf, size_t count,
-                             loff_t *off);
-
-/* Global Variable Declarations */
-// TODO: maybe remove them?
-void *buff = NULL;
-void *safe_dev = NULL;
-int count_actual_read_len = 0;
-static bool arduino_connected = false;
-
 /* Global Structure Definition to store the information about a USB device */
 struct usb_arduino {
     struct usb_device *udev;
@@ -50,15 +36,10 @@ struct usb_arduino {
     struct urb *bulk_in_urb, *bulk_out_urb;
 };
 
-static int dev_file_open(struct inode *inode, struct file *file) {
-    printk(KERN_DEBUG "Arduino Message: Inside Open Function.\n");
-    return 0;
-}
-
-static int dev_file_release(struct inode *inode, struct file *file) {
-    printk(KERN_DEBUG "Arduino Message: Inside Release Function.\n");
-    return 0;
-}
+/* Global Variable Declarations */
+static struct usb_arduino *safe_dev = NULL;
+static bool arduino_connected = false;
+DEFINE_MUTEX(arduino_mutex);
 
 static void arduino_delete(void) {
     struct usb_arduino *dev = (struct usb_arduino *)safe_dev;
@@ -72,23 +53,10 @@ static void arduino_delete(void) {
     return;
 }
 
-static struct file_operations dev_fops = {
-    .owner = THIS_MODULE,
-    .write = dev_file_write,
-    .read = dev_file_read,
-    .open = dev_file_open,
-    .release = dev_file_release,
-};
-
-static struct usb_class_driver arduino_class = {
-    .name = "ard%d",
-    .fops = &dev_fops,
-    .minor_base = 0,
-};
-
 static struct usb_device_id arduino_table[] = {
     {USB_DEVICE(0x2341, 0x8036)}, {} /* Terminating entry */
 };
+
 MODULE_DEVICE_TABLE(usb, arduino_table);
 
 static void usb_write_callback(struct urb *submit_urb) {
@@ -96,71 +64,10 @@ static void usb_write_callback(struct urb *submit_urb) {
            "Arduino Message: This is the write callback for Arduino.\n");
 }
 
-static ssize_t dev_file_read(struct file *f, char __user *buf, size_t len,
-                             loff_t *off) {
-    int retval;
-
-    struct usb_arduino *mydev = safe_dev;
-    struct usb_device *dev = mydev->udev;
-
-    printk(KERN_DEBUG "Arduino Message: Inside Read Function.\n");
-
-    retval = usb_bulk_msg(
-        dev,
-        usb_rcvbulkpipe(
-            dev, (unsigned int)mydev->bulk_in_endpoint->bEndpointAddress),
-        mydev->bulk_in_buffer, len, &count_actual_read_len, 4000);
-    printk(KERN_DEBUG "Count: %lu\n", len);
-    printk(KERN_DEBUG "Actual length: %d\n", count_actual_read_len);
-    if (retval) {
-        printk(KERN_ERR "Error: Could not submit Read URB. RetVal: %d\n",
-               retval);
-        return -1;
-    }
-    if (copy_to_user(buf, mydev->bulk_in_buffer,
-                     (unsigned long)count_actual_read_len)) {
-        printk(KERN_ERR "Error: Copy to user failed.\n");
-        return -1;
-    }
-
-    return len;
-}
-
-static ssize_t dev_file_write(struct file *f, const char __user *buf,
-                              size_t count, loff_t *off) {
-    int retval;
-    struct usb_arduino *mydev = safe_dev;
-    struct usb_device *dev = mydev->udev;
-
-    printk(KERN_DEBUG "Arduino Message: Inside write function.\n");
-
-    buff = kmalloc(128, GFP_KERNEL); // TODO: free it in case of an error
-    if (copy_from_user(buff, buf, count)) {
-        printk(KERN_ERR "Error: Could not read user data!\n");
-        return -1;
-    }
-
-    usb_fill_bulk_urb(
-        mydev->bulk_out_urb, dev,
-        usb_sndbulkpipe(
-            dev, (unsigned int)mydev->bulk_out_endpoint->bEndpointAddress),
-        buff, count, usb_write_callback, dev);
-
-    printk(KERN_DEBUG "Message from user: %s\n", (char *)buff);
-    retval = usb_submit_urb(mydev->bulk_out_urb, GFP_KERNEL);
-    if (retval) {
-        printk(KERN_ERR "Error: Could not submit!\n");
-        printk(KERN_ERR "Error Code: %d\n", retval);
-        return -1;
-    }
-
-    kfree(buff);
-
-    return 0;
-}
-
 static int arduino_probe(struct usb_interface *interface,
                          const struct usb_device_id *id) {
+    mutex_lock(&arduino_mutex);
+
     struct usb_device *udev = interface_to_usbdev(interface);
     struct usb_arduino *dev = NULL;
 
@@ -175,6 +82,7 @@ static int arduino_probe(struct usb_interface *interface,
 
     if (!udev) {
         printk(KERN_ERR "Error: udev is NULL.\n");
+        mutex_unlock(&arduino_mutex);
         return -1;
     }
 
@@ -209,11 +117,13 @@ static int arduino_probe(struct usb_interface *interface,
 
     if (!dev->bulk_in_endpoint) {
         printk(KERN_ERR "Error: Could not find bulk IN endpoint.\n");
+        mutex_unlock(&arduino_mutex);
         return -1;
     }
 
     if (!dev->bulk_out_endpoint) {
         printk(KERN_ERR "Error: Could not find bulk OUT endpoint.\n");
+        mutex_unlock(&arduino_mutex);
         return -1;
     }
 
@@ -232,11 +142,13 @@ static int arduino_probe(struct usb_interface *interface,
     dev->bulk_out_urb = usb_alloc_urb(0, GFP_KERNEL);
     if (!dev->bulk_out_urb) {
         printk(KERN_ERR "Error: Out URB not allocated space.\n");
+        mutex_unlock(&arduino_mutex);
         return -1;
     }
 
     dev->bulk_in_urb = usb_alloc_urb(0, GFP_KERNEL);
     if (!dev->bulk_in_urb) {
+        mutex_unlock(&arduino_mutex);
         printk(KERN_ERR "Error: In URB not allocated space.\n");
         return -1;
     }
@@ -245,6 +157,7 @@ static int arduino_probe(struct usb_interface *interface,
     dev->ctrl_buffer = kzalloc(8, GFP_KERNEL);
     if (!dev->ctrl_buffer) {
         printk(KERN_ERR "Error: Ctrl Buffer could not be allocated memory.\n");
+        mutex_unlock(&arduino_mutex);
         return -1;
     }
 
@@ -256,6 +169,7 @@ static int arduino_probe(struct usb_interface *interface,
                              dev->ctrl_buffer, cpu_to_le16(0x00), 0);
     if (retval < 0) {
         printk(KERN_ERR "Error: Control commands(1) could not be sent.\n");
+        mutex_unlock(&arduino_mutex);
         return -1;
     }
     printk(KERN_DEBUG "Data Bytes 1: %d\n", retval);
@@ -270,32 +184,24 @@ static int arduino_probe(struct usb_interface *interface,
                              dev->ctrl_buffer, cpu_to_le16(0x08), 0);
     if (retval < 0) {
         printk(KERN_ERR "Error: Control commands(2) could not be sent.\n");
+        mutex_unlock(&arduino_mutex);
         return -1;
     }
     printk(KERN_DEBUG "Data Bytes 2: %d\n", retval);
 
     usb_set_intfdata(interface, dev);
 
-    /* We can register the device now, as it is ready. */
-    retval = usb_register_dev(interface, &arduino_class);
-    if (retval) {
-        printk(KERN_ERR "Error: Not able to get a minor for this device.\n");
-        usb_set_intfdata(interface, NULL);
-        return -1;
-    }
-
-    dev->minor = interface->minor;
-
     arduino_connected = true;
-    printk(KERN_INFO "USB Arduino device now attached to /dev/ard%d\n",
-           interface->minor - 0);
+    printk(KERN_INFO "USB Arduino device now attached.");
 
     safe_dev = dev;
 
+    mutex_unlock(&arduino_mutex);
     return 0;
 }
 
 static void arduino_disconnect(struct usb_interface *interface) {
+    mutex_lock(&arduino_mutex);
     struct usb_arduino *dev;
     int minor = interface->minor;
 
@@ -303,10 +209,10 @@ static void arduino_disconnect(struct usb_interface *interface) {
     usb_set_intfdata(interface, NULL);
 
     arduino_delete();
-    usb_deregister_dev(interface, &arduino_class);
 
     arduino_connected = false;
     printk(KERN_INFO "Disconnecting Arduino. Minor: %d", minor);
+    mutex_unlock(&arduino_mutex);
 }
 
 static struct usb_driver arduino_driver = {
@@ -335,6 +241,7 @@ static enum power_supply_property lapekko_power_battery_props[] = {
     POWER_SUPPLY_PROP_CURRENT_NOW,
 };
 
+// mutex_lock and mutex_unlock should be called outside of this function!
 static BATTERY_DATA_T get_value_from_arduino(char id) {
     if (!arduino_connected) {
         return -1;
@@ -356,13 +263,14 @@ static BATTERY_DATA_T get_value_from_arduino(char id) {
     }
 
     int try_len = sizeof(BATTERY_DATA_T);
+    int count_actual_read_len = 0;
     retval = usb_bulk_msg(
         dev,
         usb_rcvbulkpipe(
             dev, (unsigned int)mydev->bulk_in_endpoint->bEndpointAddress),
-        mydev->bulk_in_buffer, try_len, &count_actual_read_len,
-        4000);
-    printk(KERN_DEBUG "Tried length: %d, Actual length: %d\n", try_len, count_actual_read_len);
+        mydev->bulk_in_buffer, try_len, &count_actual_read_len, 4000);
+    printk(KERN_DEBUG "Tried length: %d, Actual length: %d\n", try_len,
+           count_actual_read_len);
     if (retval) {
         printk(KERN_ERR "Error: Could not submit Read URB. RetVal: %d\n",
                retval);
@@ -370,7 +278,8 @@ static BATTERY_DATA_T get_value_from_arduino(char id) {
     }
 
     printk(KERN_DEBUG "Buffer char %c\n", mydev->bulk_in_buffer[0]);
-    printk(KERN_DEBUG "Buffer int32 %d\n", ((BATTERY_DATA_T *)mydev->bulk_in_buffer)[0]);
+    printk(KERN_DEBUG "Buffer int32 %d\n",
+           ((BATTERY_DATA_T *)mydev->bulk_in_buffer)[0]);
 
     return ((BATTERY_DATA_T *)mydev->bulk_in_buffer)[0];
 }
@@ -378,6 +287,8 @@ static BATTERY_DATA_T get_value_from_arduino(char id) {
 static int lapekko_power_get_battery_property(struct power_supply *psy,
                                               enum power_supply_property psp,
                                               union power_supply_propval *val) {
+    mutex_lock(&arduino_mutex);
+
     switch (psp) {
     case POWER_SUPPLY_PROP_MODEL_NAME:
         val->strval = "Lapekko battery";
@@ -418,9 +329,11 @@ static int lapekko_power_get_battery_property(struct power_supply *psy,
         val->intval = get_value_from_arduino(BATTERY_CMD_CURRENT_NOW);
         break;
     default:
-        pr_info("%s: some properties deliberately report errors.\n", __func__);
+        mutex_unlock(&arduino_mutex);
         return -EINVAL;
     }
+
+    mutex_unlock(&arduino_mutex);
     return 0;
 }
 
@@ -431,9 +344,7 @@ static const struct power_supply_desc lapekko_power_desc = {
     .num_properties = ARRAY_SIZE(lapekko_power_battery_props),
     .get_property = lapekko_power_get_battery_property};
 
-static const struct power_supply_config lapekko_power_config = {
-
-};
+static const struct power_supply_config lapekko_power_config = {};
 
 static int __init myModuleInit(void) {
     int ret;
