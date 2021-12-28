@@ -7,3 +7,4 @@ compile_commands.json
 *.mod
 *.mod.c
 *.o
+arduino/preprocessed/

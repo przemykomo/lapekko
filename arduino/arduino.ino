@@ -1,3 +1,5 @@
+#include "../common.h"
+
 void setup() {
   Serial.begin(9600);
 }
@@ -5,17 +7,13 @@ void setup() {
 void loop() {
   if (Serial.available() > 0) {
     char command = Serial.read();
-//    if (command != '\r' && command != '\n') {
-//      Serial.print(command, DEC);
-//    }
-
-    char data = 54;
+    BATTERY_DATA_T data = 70;
 
     switch (command) {
-      case 49: // '1'
-        Serial.write('E');
+      case '1':
+        Serial.write(data);
       break;
-      case 50: // '2'
+      case '2':
         Serial.write(data);
       break;
     }

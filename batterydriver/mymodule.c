@@ -1,5 +1,6 @@
 #include "linux/err.h"
 #include "linux/gfp.h"
+#include "linux/kern_levels.h"
 #include "linux/kernel.h"
 #include "linux/printk.h"
 #include "linux/stddef.h"
@@ -17,6 +18,8 @@
 #include <linux/usb.h>
 
 #include <linux/power_supply.h>
+
+#include "../common.h"
 
 // Original module that this one is based on:
 // https://github.com/suhitsinha/Kernel-Device-Driver-for-Arduino
@@ -131,7 +134,7 @@ static ssize_t dev_file_write(struct file *f, const char __user *buf,
 
     printk(KERN_DEBUG "Arduino Message: Inside write function.\n");
 
-    buff = kmalloc(128, GFP_KERNEL); //TODO: free it in case of an error
+    buff = kmalloc(128, GFP_KERNEL); // TODO: free it in case of an error
     if (copy_from_user(buff, buf, count)) {
         printk(KERN_ERR "Error: Could not read user data!\n");
         return -1;
@@ -334,7 +337,7 @@ static enum power_supply_property lapekko_power_battery_props[] = {
     POWER_SUPPLY_PROP_CURRENT_NOW,
 };
 
-static int get_value_from_arduino(char id) {
+static BATTERY_DATA_T get_value_from_arduino(char id) {
     if (!arduino_connected) {
         return -1;
     }
@@ -342,21 +345,23 @@ static int get_value_from_arduino(char id) {
     int retval;
     struct usb_arduino *mydev = safe_dev;
     struct usb_device *dev = mydev->udev;
-    //buff = kmalloc(1, GFP_KERNEL); //TODO: free it in case of an error
-    //buff[0] = id;
 
     usb_fill_bulk_urb(
         mydev->bulk_out_urb, dev,
-        usb_sndbulkpipe(dev, (unsigned int)mydev->bulk_out_endpoint->bEndpointAddress), &id,
-        1, usb_write_callback, dev);
+        usb_sndbulkpipe(
+            dev, (unsigned int)mydev->bulk_out_endpoint->bEndpointAddress),
+        &id, 1, usb_write_callback, dev);
     retval = usb_submit_urb(mydev->bulk_out_urb, GFP_KERNEL);
     if (retval) {
         return -2;
     }
 
     retval = usb_bulk_msg(
-        dev, usb_rcvbulkpipe(dev, (unsigned int)mydev->bulk_in_endpoint->bEndpointAddress),
-        mydev->bulk_in_buffer, 1, &count_actual_read_len, 4000);
+        dev,
+        usb_rcvbulkpipe(
+            dev, (unsigned int)mydev->bulk_in_endpoint->bEndpointAddress),
+        mydev->bulk_in_buffer, sizeof(BATTERY_DATA_T), &count_actual_read_len,
+        4000);
     printk(KERN_DEBUG "Actual length: %d\n", count_actual_read_len);
     if (retval) {
         printk(KERN_ERR "Error: Could not submit Read URB. RetVal: %d\n",
@@ -364,8 +369,7 @@ static int get_value_from_arduino(char id) {
         return -3;
     }
 
-    //kfree(buff);
-    return mydev->bulk_in_buffer[0];
+    return ((BATTERY_DATA_T *)mydev->bulk_in_buffer)[0];
 }
 
 static int lapekko_power_get_battery_property(struct power_supply *psy,
@@ -395,7 +399,8 @@ static int lapekko_power_get_battery_property(struct power_supply *psy,
         break;
     case POWER_SUPPLY_PROP_CAPACITY:
     case POWER_SUPPLY_PROP_CHARGE_NOW:
-        val->intval = 50; // in percents
+        // val->intval = 50; // in percents
+        val->intval = get_value_from_arduino('1');
         break;
     case POWER_SUPPLY_PROP_CHARGE_COUNTER:
         val->intval = -1000;
