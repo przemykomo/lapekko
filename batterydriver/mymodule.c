@@ -329,8 +329,6 @@ static enum power_supply_property lapekko_power_battery_props[] = {
     POWER_SUPPLY_PROP_CHARGE_COUNTER,
     POWER_SUPPLY_PROP_CAPACITY,
     POWER_SUPPLY_PROP_CAPACITY_LEVEL,
-    POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
-    POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
     POWER_SUPPLY_PROP_MODEL_NAME,
     POWER_SUPPLY_PROP_MANUFACTURER,
     POWER_SUPPLY_PROP_VOLTAGE_NOW,
@@ -341,6 +339,7 @@ static BATTERY_DATA_T get_value_from_arduino(char id) {
     if (!arduino_connected) {
         return -1;
     }
+    printk(KERN_DEBUG "Trying to read value %c\n", id);
 
     int retval;
     struct usb_arduino *mydev = safe_dev;
@@ -356,18 +355,22 @@ static BATTERY_DATA_T get_value_from_arduino(char id) {
         return -2;
     }
 
+    int try_len = sizeof(BATTERY_DATA_T);
     retval = usb_bulk_msg(
         dev,
         usb_rcvbulkpipe(
             dev, (unsigned int)mydev->bulk_in_endpoint->bEndpointAddress),
-        mydev->bulk_in_buffer, sizeof(BATTERY_DATA_T), &count_actual_read_len,
+        mydev->bulk_in_buffer, try_len, &count_actual_read_len,
         4000);
-    printk(KERN_DEBUG "Actual length: %d\n", count_actual_read_len);
+    printk(KERN_DEBUG "Tried length: %d, Actual length: %d\n", try_len, count_actual_read_len);
     if (retval) {
         printk(KERN_ERR "Error: Could not submit Read URB. RetVal: %d\n",
                retval);
         return -3;
     }
+
+    printk(KERN_DEBUG "Buffer char %c\n", mydev->bulk_in_buffer[0]);
+    printk(KERN_DEBUG "Buffer int32 %d\n", ((BATTERY_DATA_T *)mydev->bulk_in_buffer)[0]);
 
     return ((BATTERY_DATA_T *)mydev->bulk_in_buffer)[0];
 }
@@ -389,7 +392,7 @@ static int lapekko_power_get_battery_property(struct power_supply *psy,
         val->intval = POWER_SUPPLY_HEALTH_UNKNOWN;
         break;
     case POWER_SUPPLY_PROP_PRESENT:
-        val->intval = 1;
+        val->intval = arduino_connected;
         break;
     case POWER_SUPPLY_PROP_TECHNOLOGY:
         val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
@@ -399,27 +402,20 @@ static int lapekko_power_get_battery_property(struct power_supply *psy,
         break;
     case POWER_SUPPLY_PROP_CAPACITY:
     case POWER_SUPPLY_PROP_CHARGE_NOW:
-        // val->intval = 50; // in percents
-        val->intval = get_value_from_arduino('1');
+        val->intval = get_value_from_arduino(BATTERY_CMD_CHARGE_NOW);
         break;
     case POWER_SUPPLY_PROP_CHARGE_COUNTER:
-        val->intval = -1000;
+        val->intval = get_value_from_arduino(BATTERY_CMD_CHARGE_COUNTER);
         break;
     case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
     case POWER_SUPPLY_PROP_CHARGE_FULL:
         val->intval = 100;
         break;
-    case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG:
-    case POWER_SUPPLY_PROP_TIME_TO_FULL_NOW:
-        val->intval = 3600;
-        break;
     case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-        val->intval = get_value_from_arduino('2');
-        // val->intval = 3300000; // lets say this is accessed by command '1'
-        // (49) in arduino serial
+        val->intval = get_value_from_arduino(BATTERY_CMD_VOLTAGE_NOW);
         break;
     case POWER_SUPPLY_PROP_CURRENT_NOW:
-        val->intval = -1600;
+        val->intval = get_value_from_arduino(BATTERY_CMD_CURRENT_NOW);
         break;
     default:
         pr_info("%s: some properties deliberately report errors.\n", __func__);
