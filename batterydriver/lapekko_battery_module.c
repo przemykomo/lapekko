@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include "linux/err.h"
 #include "linux/gfp.h"
 #include "linux/kern_levels.h"
@@ -26,198 +28,37 @@
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Lapekko battery driver");
 
+static void usb_write_callback(struct urb *submit_urb);
+static int arduino_probe(struct usb_interface *interface,
+                         const struct usb_device_id *id);
+static void arduino_disconnect(struct usb_interface *interface);
+static BATTERY_DATA_T get_value_from_arduino(char id);
+static int lapekko_power_get_battery_property(struct power_supply *psy,
+                                              enum power_supply_property psp,
+                                              union power_supply_propval *val);
+
 /* Global Structure Definition to store the information about a USB device */
 struct usb_arduino {
     struct usb_device *udev;
-    struct usb_interface *interface;
-    unsigned char minor;
-    char *bulk_in_buffer, *bulk_out_buffer, *ctrl_buffer;
+    char *bulk_in_buffer, *ctrl_buffer;
     struct usb_endpoint_descriptor *bulk_in_endpoint, *bulk_out_endpoint;
     struct urb *bulk_in_urb, *bulk_out_urb;
 };
 
 /* Global Variable Declarations */
-static struct usb_arduino *safe_dev = NULL;
+static struct usb_arduino *main_usb_arduino = NULL;
 static bool arduino_connected = false;
 DEFINE_MUTEX(arduino_mutex);
 
-static void arduino_delete(void) {
-    struct usb_arduino *dev = (struct usb_arduino *)safe_dev;
-
-    /* Release all the resources */
-    usb_free_urb(dev->bulk_out_urb);
-    kfree(dev->bulk_in_buffer);
-    kfree(dev->bulk_out_buffer);
-    kfree(dev->ctrl_buffer);
-
-    return;
-}
-
-static struct usb_device_id arduino_table[] = {
+static struct usb_device_id arduino_id_table[] = {
     {USB_DEVICE(0x2341, 0x8036)}, {} /* Terminating entry */
 };
 
-MODULE_DEVICE_TABLE(usb, arduino_table);
+MODULE_DEVICE_TABLE(usb, arduino_id_table);
 
-static void usb_write_callback(struct urb *submit_urb) {
-    printk(KERN_DEBUG
-           "Arduino Message: This is the write callback for Arduino.\n");
-}
-
-static int arduino_probe(struct usb_interface *interface,
-                         const struct usb_device_id *id) {
-    mutex_lock(&arduino_mutex);
-
-    struct usb_device *udev = interface_to_usbdev(interface);
-    struct usb_arduino *dev = NULL;
-
-    struct usb_host_interface *arduino_currsetting;
-    struct usb_endpoint_descriptor *endpoint;
-
-    int retval, i;
-    int bulk_end_size_in, bulk_end_size_out;
-
-    msleep(4000);
-    printk(KERN_INFO "USB Device Inserted. Probing Arduino.\n");
-
-    if (!udev) {
-        printk(KERN_ERR "Error: udev is NULL.\n");
-        mutex_unlock(&arduino_mutex);
-        return -1;
-    }
-
-    dev = kmalloc(sizeof(struct usb_arduino), GFP_KERNEL);
-
-    dev->udev = udev;
-    dev->interface = interface;
-
-    arduino_currsetting = interface->cur_altsetting;
-
-    for (i = 0; i < arduino_currsetting->desc.bNumEndpoints; ++i) {
-        endpoint = &arduino_currsetting->endpoint[i].desc;
-
-        printk(KERN_DEBUG "Endpoint address: %u",
-               (unsigned int)endpoint->bEndpointAddress);
-        if (((endpoint->bEndpointAddress & USB_ENDPOINT_DIR_MASK) ==
-             USB_DIR_IN) &&
-            ((endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) ==
-             USB_ENDPOINT_XFER_BULK)) {
-            dev->bulk_in_endpoint = endpoint;
-            printk(KERN_INFO "Found Bulk Endpoint IN\n");
-        }
-
-        if (((endpoint->bEndpointAddress & USB_ENDPOINT_DIR_MASK) ==
-             USB_DIR_OUT) &&
-            ((endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) ==
-             USB_ENDPOINT_XFER_BULK)) {
-            dev->bulk_out_endpoint = endpoint;
-            printk(KERN_INFO "Found Bulk Endpoint OUT\n");
-        }
-    }
-
-    if (!dev->bulk_in_endpoint) {
-        printk(KERN_ERR "Error: Could not find bulk IN endpoint.\n");
-        mutex_unlock(&arduino_mutex);
-        return -1;
-    }
-
-    if (!dev->bulk_out_endpoint) {
-        printk(KERN_ERR "Error: Could not find bulk OUT endpoint.\n");
-        mutex_unlock(&arduino_mutex);
-        return -1;
-    }
-
-    // To convert data in little indian format to cpu specific format
-    bulk_end_size_in = le16_to_cpu(dev->bulk_in_endpoint->wMaxPacketSize);
-    bulk_end_size_out = le16_to_cpu(dev->bulk_out_endpoint->wMaxPacketSize);
-
-    // Allocate a buffer of max packet size of the interrupt
-    dev->bulk_in_buffer = kmalloc(bulk_end_size_in, GFP_KERNEL);
-    dev->bulk_out_buffer = kmalloc(bulk_end_size_out, GFP_KERNEL);
-
-    // Creates an urb for the USB driver to use, increments the usage counter,
-    // and returns a pointer to it.
-    //  ISO_PACKET parameter 0 for interrupt bulk and control urbs
-
-    dev->bulk_out_urb = usb_alloc_urb(0, GFP_KERNEL);
-    if (!dev->bulk_out_urb) {
-        printk(KERN_ERR "Error: Out URB not allocated space.\n");
-        mutex_unlock(&arduino_mutex);
-        return -1;
-    }
-
-    dev->bulk_in_urb = usb_alloc_urb(0, GFP_KERNEL);
-    if (!dev->bulk_in_urb) {
-        mutex_unlock(&arduino_mutex);
-        printk(KERN_ERR "Error: In URB not allocated space.\n");
-        return -1;
-    }
-
-    /* setup control urb packet */
-    dev->ctrl_buffer = kzalloc(8, GFP_KERNEL);
-    if (!dev->ctrl_buffer) {
-        printk(KERN_ERR "Error: Ctrl Buffer could not be allocated memory.\n");
-        mutex_unlock(&arduino_mutex);
-        return -1;
-    }
-
-    // Changed value from 0x00 to 0x03 because packet from cdc_acm had it set
-    // to 3. IDK what's that, but this module started getting messages from
-    // arduino after I changed it to 3.
-    retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0), 0x22,
-                             0x21, cpu_to_le16(0x03), cpu_to_le16(0x00),
-                             dev->ctrl_buffer, cpu_to_le16(0x00), 0);
-    if (retval < 0) {
-        printk(KERN_ERR "Error: Control commands(1) could not be sent.\n");
-        mutex_unlock(&arduino_mutex);
-        return -1;
-    }
-    printk(KERN_DEBUG "Data Bytes 1: %d\n", retval);
-
-    // set control commands
-    dev->ctrl_buffer[0] = 0x80;
-    dev->ctrl_buffer[1] = 0x25;
-    dev->ctrl_buffer[6] = 0x08;
-
-    retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0), 0x20,
-                             0x21, cpu_to_le16(0x00), cpu_to_le16(0x00),
-                             dev->ctrl_buffer, cpu_to_le16(0x08), 0);
-    if (retval < 0) {
-        printk(KERN_ERR "Error: Control commands(2) could not be sent.\n");
-        mutex_unlock(&arduino_mutex);
-        return -1;
-    }
-    printk(KERN_DEBUG "Data Bytes 2: %d\n", retval);
-
-    usb_set_intfdata(interface, dev);
-
-    arduino_connected = true;
-    printk(KERN_INFO "USB Arduino device now attached.");
-
-    safe_dev = dev;
-
-    mutex_unlock(&arduino_mutex);
-    return 0;
-}
-
-static void arduino_disconnect(struct usb_interface *interface) {
-    mutex_lock(&arduino_mutex);
-    struct usb_arduino *dev;
-    int minor = interface->minor;
-
-    dev = usb_get_intfdata(interface);
-    usb_set_intfdata(interface, NULL);
-
-    arduino_delete();
-
-    arduino_connected = false;
-    printk(KERN_INFO "Disconnecting Arduino. Minor: %d", minor);
-    mutex_unlock(&arduino_mutex);
-}
-
-static struct usb_driver arduino_driver = {
-    .name = "arduino",
-    .id_table = arduino_table,
+static struct usb_driver arduino_usb_driver = {
+    .name = "lapekko_arduino",
+    .id_table = arduino_id_table,
     .probe = arduino_probe,
     .disconnect = arduino_disconnect,
 };
@@ -241,47 +82,196 @@ static enum power_supply_property lapekko_power_battery_props[] = {
     POWER_SUPPLY_PROP_CURRENT_NOW,
 };
 
+static const struct power_supply_desc lapekko_power_desc = {
+    .name = "lapekko_battery",
+    .type = POWER_SUPPLY_TYPE_BATTERY,
+    .properties = lapekko_power_battery_props,
+    .num_properties = ARRAY_SIZE(lapekko_power_battery_props),
+    .get_property = lapekko_power_get_battery_property};
+
+static const struct power_supply_config lapekko_power_config = {};
+
+static void usb_write_callback(struct urb *submit_urb) {}
+
+static int arduino_probe(struct usb_interface *interface,
+                         const struct usb_device_id *id) {
+    struct usb_device *udev = interface_to_usbdev(interface);
+    struct usb_arduino *dev = NULL;
+
+    struct usb_host_interface *arduino_currsetting;
+    struct usb_endpoint_descriptor *endpoint;
+
+    int retval, i;
+    int bulk_end_size_in, bulk_end_size_out;
+
+    msleep(4000);
+    pr_info("USB Device Inserted. Probing Arduino.\n");
+
+    if (!udev) {
+        pr_err("Error: udev is NULL.\n");
+        return -1;
+    }
+
+    dev = kmalloc(sizeof(struct usb_arduino), GFP_KERNEL);
+
+    dev->udev = udev;
+
+    arduino_currsetting = interface->cur_altsetting;
+
+    for (i = 0; i < arduino_currsetting->desc.bNumEndpoints; ++i) {
+        endpoint = &arduino_currsetting->endpoint[i].desc;
+
+        if (((endpoint->bEndpointAddress & USB_ENDPOINT_DIR_MASK) ==
+             USB_DIR_IN) &&
+            ((endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) ==
+             USB_ENDPOINT_XFER_BULK)) {
+            dev->bulk_in_endpoint = endpoint;
+        }
+
+        if (((endpoint->bEndpointAddress & USB_ENDPOINT_DIR_MASK) ==
+             USB_DIR_OUT) &&
+            ((endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) ==
+             USB_ENDPOINT_XFER_BULK)) {
+            dev->bulk_out_endpoint = endpoint;
+        }
+    }
+
+    if (!dev->bulk_in_endpoint) {
+        pr_err("Error: Could not find bulk IN endpoint.\n");
+        return -1;
+    }
+
+    if (!dev->bulk_out_endpoint) {
+        pr_err("Error: Could not find bulk OUT endpoint.\n");
+        return -1;
+    }
+
+    // To convert data in little indian format to cpu specific format
+    bulk_end_size_in = le16_to_cpu(dev->bulk_in_endpoint->wMaxPacketSize);
+    bulk_end_size_out = le16_to_cpu(dev->bulk_out_endpoint->wMaxPacketSize);
+
+    // Allocate a buffer of max packet size of the interrupt
+    dev->bulk_in_buffer = kmalloc(bulk_end_size_in, GFP_KERNEL);
+
+    // Creates an urb for the USB driver to use, increments the usage counter,
+    // and returns a pointer to it.
+    //  ISO_PACKET parameter 0 for interrupt bulk and control urbs
+
+    dev->bulk_out_urb = usb_alloc_urb(0, GFP_KERNEL);
+    if (!dev->bulk_out_urb) {
+        pr_err("Error: Out URB not allocated space.\n");
+        return -1;
+    }
+
+    dev->bulk_in_urb = usb_alloc_urb(0, GFP_KERNEL);
+    if (!dev->bulk_in_urb) {
+        pr_err("Error: In URB not allocated space.\n");
+        return -1;
+    }
+
+    /* setup control urb packet */
+    dev->ctrl_buffer = kzalloc(8, GFP_KERNEL);
+    if (!dev->ctrl_buffer) {
+        pr_err("Error: Ctrl Buffer could not be allocated memory.\n");
+        return -1;
+    }
+
+    // Changed value from 0x00 to 0x03 because packet from cdc_acm had it set
+    // to 3. IDK what's that, but this module started getting messages from
+    // arduino after I changed it to 3.
+    retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0), 0x22,
+                             0x21, cpu_to_le16(0x03), cpu_to_le16(0x00),
+                             dev->ctrl_buffer, cpu_to_le16(0x00), 0);
+    if (retval < 0) {
+        pr_err("Error: Control commands(1) could not be sent.\n");
+        return -1;
+    }
+
+    // set control commands
+    dev->ctrl_buffer[0] = 0x80;
+    dev->ctrl_buffer[1] = 0x25;
+    dev->ctrl_buffer[6] = 0x08;
+
+    retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0), 0x20,
+                             0x21, cpu_to_le16(0x00), cpu_to_le16(0x00),
+                             dev->ctrl_buffer, cpu_to_le16(0x08), 0);
+    if (retval < 0) {
+        pr_err("Error: Control commands(2) could not be sent.\n");
+        return -1;
+    }
+
+    usb_set_intfdata(interface, dev);
+
+    arduino_connected = true;
+    pr_info("USB Arduino device now attached.");
+
+    mutex_lock(&arduino_mutex);
+
+    main_usb_arduino = dev;
+
+    mutex_unlock(&arduino_mutex);
+    return 0;
+}
+
+static void arduino_disconnect(struct usb_interface *interface) {
+    struct usb_arduino *dev;
+
+    dev = usb_get_intfdata(interface);
+    usb_set_intfdata(interface, NULL);
+
+    usb_free_urb(dev->bulk_out_urb);
+    kfree(dev->bulk_in_buffer);
+    kfree(dev->ctrl_buffer);
+
+    mutex_lock(&arduino_mutex);
+
+    if (dev == main_usb_arduino) {
+        main_usb_arduino = NULL;
+        arduino_connected = false;
+    }
+
+    mutex_unlock(&arduino_mutex);
+
+    pr_info("Disconnecting Arduino.");
+}
+
 // mutex_lock and mutex_unlock should be called outside of this function!
 static BATTERY_DATA_T get_value_from_arduino(char id) {
     if (!arduino_connected) {
         return -1;
     }
-    printk(KERN_DEBUG "Trying to read value %c\n", id);
 
+    pr_debug("Trying to read value %c\n", id);
     int retval;
-    struct usb_arduino *mydev = safe_dev;
-    struct usb_device *dev = mydev->udev;
 
     usb_fill_bulk_urb(
-        mydev->bulk_out_urb, dev,
-        usb_sndbulkpipe(
-            dev, (unsigned int)mydev->bulk_out_endpoint->bEndpointAddress),
-        &id, 1, usb_write_callback, dev);
-    retval = usb_submit_urb(mydev->bulk_out_urb, GFP_KERNEL);
+        main_usb_arduino->bulk_out_urb, main_usb_arduino->udev,
+        usb_sndbulkpipe(main_usb_arduino->udev,
+                        (unsigned int)main_usb_arduino->bulk_out_endpoint
+                            ->bEndpointAddress),
+        &id, 1, usb_write_callback, main_usb_arduino->udev);
+
+    retval = usb_submit_urb(main_usb_arduino->bulk_out_urb, GFP_KERNEL);
+
     if (retval) {
         return -2;
     }
 
-    int try_len = sizeof(BATTERY_DATA_T);
-    int count_actual_read_len = 0;
+    int actual_length = 0;
     retval = usb_bulk_msg(
-        dev,
+        main_usb_arduino->udev,
         usb_rcvbulkpipe(
-            dev, (unsigned int)mydev->bulk_in_endpoint->bEndpointAddress),
-        mydev->bulk_in_buffer, try_len, &count_actual_read_len, 4000);
-    printk(KERN_DEBUG "Tried length: %d, Actual length: %d\n", try_len,
-           count_actual_read_len);
+            main_usb_arduino->udev,
+            (unsigned int)main_usb_arduino->bulk_in_endpoint->bEndpointAddress),
+        main_usb_arduino->bulk_in_buffer, sizeof(BATTERY_DATA_T),
+        &actual_length, 4000);
+
     if (retval) {
-        printk(KERN_ERR "Error: Could not submit Read URB. RetVal: %d\n",
-               retval);
+        pr_err("Error: Could not submit Read URB. RetVal: %d\n", retval);
         return -3;
     }
 
-    printk(KERN_DEBUG "Buffer char %c\n", mydev->bulk_in_buffer[0]);
-    printk(KERN_DEBUG "Buffer int32 %d\n",
-           ((BATTERY_DATA_T *)mydev->bulk_in_buffer)[0]);
-
-    return ((BATTERY_DATA_T *)mydev->bulk_in_buffer)[0];
+    return ((BATTERY_DATA_T *)main_usb_arduino->bulk_in_buffer)[0];
 }
 
 static int lapekko_power_get_battery_property(struct power_supply *psy,
@@ -337,42 +327,34 @@ static int lapekko_power_get_battery_property(struct power_supply *psy,
     return 0;
 }
 
-static const struct power_supply_desc lapekko_power_desc = {
-    .name = "lapekko_battery",
-    .type = POWER_SUPPLY_TYPE_BATTERY,
-    .properties = lapekko_power_battery_props,
-    .num_properties = ARRAY_SIZE(lapekko_power_battery_props),
-    .get_property = lapekko_power_get_battery_property};
-
-static const struct power_supply_config lapekko_power_config = {};
-
-static int __init myModuleInit(void) {
+static int __init lapekko_module_init(void) {
     int ret;
-    ret = usb_register(&arduino_driver);
+    ret = usb_register(&arduino_usb_driver);
 
     if (ret) {
-        printk(KERN_ERR
-               "Failed to register the Arduino device with error code %d\n",
+        pr_err("Failed to register the Arduino device with error code %d\n",
                ret);
         return 0;
     }
 
     lapekko_power_supply =
         power_supply_register(NULL, &lapekko_power_desc, &lapekko_power_config);
+
     if (IS_ERR(lapekko_power_supply)) {
         pr_err("%s: failed to register: %s\n", __func__,
                lapekko_power_desc.name);
         power_supply_unregister(lapekko_power_supply);
+
         return PTR_ERR(lapekko_power_supply);
     }
 
     return 0;
 }
 
-static void __exit myModuleExit(void) {
-    usb_deregister(&arduino_driver);
+static void __exit lapekko_module_exit(void) {
+    usb_deregister(&arduino_usb_driver);
     power_supply_unregister(lapekko_power_supply);
 }
 
-module_init(myModuleInit);
-module_exit(myModuleExit);
+module_init(lapekko_module_init);
+module_exit(lapekko_module_exit);
