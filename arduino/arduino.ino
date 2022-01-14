@@ -20,6 +20,8 @@ void writeData(BATTERY_DATA_T data) {
 }
 
 void loop() {
+    current_now = ((analogRead(A0) * (5.0 / 1023.0) - 2.5) / 185.0 / 4.8 * 5.0 * 1000000000.0);
+
     while (Serial.available() > 0) {
         char command = Serial.read();
 
