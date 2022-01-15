@@ -183,7 +183,7 @@ static int arduino_probe(struct usb_interface *interface,
 
 // arduino nano clone code, some based of on https://github.com/torvalds/linux/blob/master/drivers/usb/serial/ch341.c
 // TODO: clean this up, check and remove what's not needed
-#ifndef LEONARDO
+#ifdef ARDUINO_NANO
 
 #define CH341_REQ_SERIAL_INIT 0xA1
 #define DEFAULT_TIMEOUT 1000
@@ -324,7 +324,8 @@ static int arduino_probe(struct usb_interface *interface,
                retval);
         return -1;
     }
-#else
+#endif
+#ifdef ARDUINO_LEONARDO
 
     // Changed value from 0x00 to 0x03 because packet from cdc_acm had it set
     // to 3. IDK what's that, but this module started getting messages from
