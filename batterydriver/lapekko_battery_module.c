@@ -1,3 +1,5 @@
+#include "asm-generic/int-ll64.h"
+#include "linux/usb/ch9.h"
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include "linux/err.h"
@@ -51,7 +53,9 @@ static bool arduino_connected = false;
 DEFINE_MUTEX(arduino_mutex);
 
 static struct usb_device_id arduino_id_table[] = {
-    {USB_DEVICE(0x2341, 0x8036)}, {} /* Terminating entry */
+    {USB_DEVICE(0x2341, 0x8036)}, // leonardo
+    {USB_DEVICE(0x1a86, 0x7523)}, // nano clone
+    {}                            // Terminating entry
 };
 
 MODULE_DEVICE_TABLE(usb, arduino_id_table);
@@ -176,6 +180,152 @@ static int arduino_probe(struct usb_interface *interface,
         return -1;
     }
 
+
+// arduino nano clone code, some based of on https://github.com/torvalds/linux/blob/master/drivers/usb/serial/ch341.c
+// TODO: clean this up, check and remove what's not needed
+#ifndef LEONARDO
+
+#define CH341_REQ_SERIAL_INIT 0xA1
+#define DEFAULT_TIMEOUT 1000
+#define CH341_REQ_WRITE_REG 0x9A
+#define CH341_REG_LCR2 0x25
+#define CH341_REG_LCR 0x18
+#define CH341_LCR_ENABLE_RX 0x80
+#define CH341_LCR_ENABLE_TX 0x40
+#define CH341_LCR_CS8 0x03
+#define CH341_REQ_MODEM_CTRL 0xA4
+#define CH341_REQ_READ_VERSION 0x5F
+#define CH341_REQ_READ_REG 0x95
+
+    const unsigned int size = 2;
+    u8 buffer[2];
+    // r = ch341_control_in(dev, CH341_REQ_READ_VERSION, 0, 0, buffer, size);
+    retval =
+        usb_control_msg_recv(dev->udev, 0, CH341_REQ_READ_VERSION,
+                             USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_IN, 0,
+                             0, buffer, size, DEFAULT_TIMEOUT, GFP_KERNEL);
+
+    if (retval < 0) {
+        pr_err("Error: Control commands(CH341_REQ_READ_VERSION) could not be "
+               "sent. RetVal: %d\n",
+               retval);
+        return -1;
+    }
+    pr_info("Chip version: 0x%02x\n", buffer[0]);
+
+    // init I guess
+    retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0),
+                             CH341_REQ_SERIAL_INIT,
+                             USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
+                             0, 0, NULL, 0, DEFAULT_TIMEOUT);
+
+    if (retval < 0) {
+        pr_err("Error: Control commands(CH341_REQ_SERIAL_INIT) could not be "
+               "sent. RetVal: %d\n",
+               retval);
+        return -1;
+    }
+
+    // set baud rate I guess
+    retval = usb_control_msg(
+        dev->udev, usb_sndctrlpipe(dev->udev, 0), CH341_REQ_WRITE_REG,
+        USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
+        CH341_REG_LCR2 << 8 | CH341_REG_LCR,
+        CH341_LCR_ENABLE_RX | CH341_LCR_ENABLE_TX | CH341_LCR_CS8, NULL, 0,
+        DEFAULT_TIMEOUT);
+
+    if (retval < 0) {
+        pr_err("Error: Control commands(CH341_REQ_WRITE_REG) could not be "
+               "sent. RetVal: %d\n",
+               retval);
+        return -1;
+    }
+
+    // set handshake
+    retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0),
+                             CH341_REQ_MODEM_CTRL,
+                             USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
+                             ~0, // ~control
+                             0, NULL, 0, DEFAULT_TIMEOUT);
+
+    if (retval < 0) {
+        pr_err("Error: Control commands(CH341_REQ_MODEM_CTRL) could not be "
+               "sent. RetVal: %d\n",
+               retval);
+        return -1;
+    }
+
+    retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0),
+                             CH341_REQ_WRITE_REG,
+                             USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
+                             0x1312, 0xb282, NULL, 0, DEFAULT_TIMEOUT);
+
+    if (retval < 0) {
+        pr_err("Error: Control commands(0x1312) could not be "
+               "sent. RetVal: %d\n",
+               retval);
+        return -1;
+    }
+
+    retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0),
+                             CH341_REQ_WRITE_REG,
+                             USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
+                             0x2518, 0x00c3, NULL, 0, DEFAULT_TIMEOUT);
+
+    if (retval < 0) {
+        pr_err("Error: Control commands(0x2518) could not be "
+               "sent. RetVal: %d\n",
+               retval);
+        return -1;
+    }
+
+    // set handshake 2 for some reason
+    retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0),
+                             CH341_REQ_MODEM_CTRL,
+                             USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
+                             ~0, // ~control
+                             0, NULL, 0, DEFAULT_TIMEOUT);
+
+    if (retval < 0) {
+        pr_err("Error: Control commands(CH341_REQ_MODEM_CTRL v2) could not be "
+               "sent. RetVal: %d\n",
+               retval);
+        return -1;
+    }
+
+    // HERE USB_INTERRUPT in FOR SOME REASON SHOULD BE I GUESS? I'll omit it for
+    // now.
+
+    // r = ch341_control_in(dev, CH341_REQ_READ_REG, 0x0706, 0, buffer, size);
+    retval = usb_control_msg_recv(
+        dev->udev, 0, CH341_REQ_READ_REG,
+        USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_IN, 0x0706, 0, buffer,
+        size, DEFAULT_TIMEOUT, GFP_KERNEL);
+
+    if (retval < 0) {
+        pr_err("Error: Control commands(CH341_REQ_READ_REG) could not be "
+               "sent. RetVal: %d\n",
+               retval);
+        return -1;
+    }
+    pr_info("Chip status: 0x%02x\n", buffer[0]);
+
+
+    // set handshake 3 but different for some reason
+    retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0),
+                             CH341_REQ_MODEM_CTRL,
+                             USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
+                             0xff9f,
+                             0, NULL, 0, DEFAULT_TIMEOUT);
+
+    if (retval < 0) {
+        pr_err("Error: Control commands(CH341_REQ_MODEM_CTRL v3) could not be "
+               "sent. RetVal: %d\n",
+               retval);
+        return -1;
+    }
+#else
+
     // Changed value from 0x00 to 0x03 because packet from cdc_acm had it set
     // to 3. IDK what's that, but this module started getting messages from
     // arduino after I changed it to 3.
@@ -183,7 +333,8 @@ static int arduino_probe(struct usb_interface *interface,
                              0x21, cpu_to_le16(0x03), cpu_to_le16(0x00),
                              dev->ctrl_buffer, cpu_to_le16(0x00), 0);
     if (retval < 0) {
-        pr_err("Error: Control commands(1) could not be sent.\n");
+        pr_err("Error: Control commands(1) could not be sent. RetVal: %d\n",
+               retval);
         return -1;
     }
 
@@ -196,10 +347,11 @@ static int arduino_probe(struct usb_interface *interface,
                              0x21, cpu_to_le16(0x00), cpu_to_le16(0x00),
                              dev->ctrl_buffer, cpu_to_le16(0x08), 0);
     if (retval < 0) {
-        pr_err("Error: Control commands(2) could not be sent.\n");
+        pr_err("Error: Control commands(2) could not be sent. RetVal: %d\n",
+               retval);
         return -1;
     }
-
+#endif
     usb_set_intfdata(interface, dev);
 
     arduino_connected = true;
