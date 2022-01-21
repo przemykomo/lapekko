@@ -1,8 +1,10 @@
 #include "../common.h"
 
-BATTERY_DATA_T charge_now = 0; // TODO: update it and store periodically on EEPROM
+BATTERY_DATA_T charge_now = 6000000; // TODO: store periodically on EEPROM
 BATTERY_DATA_T voltage_now = 15000000;
 BATTERY_DATA_T current_now = 3000000;
+
+unsigned long lastTime = 0;
 
 void setup() {
     Serial.begin(9600);
@@ -29,6 +31,22 @@ void loop() {
     current_now = ((analogRead(A7) * (5.0 / 1023.0) - 2.5) / 185.0 / 4.8 * 5.0 * 1000000000.0);
     current_now = abs(current_now);
 
+    unsigned long now = micros();
+    if (now - lastTime > 1000000) {
+        charge_now -= current_now * ((now - lastTime) / 3600000000.0);
+/* debugging code
+        Serial.print("Current: ");
+        Serial.print(current_now);
+        Serial.print(", charge: ");
+        Serial.print(charge_now);
+        Serial.print(", (n - l): ");
+        Serial.print(now - lastTime);
+        Serial.print(", delta: ");
+        Serial.println(current_now * ((now - lastTime) / 3600000000.0));
+*/
+        lastTime = now;
+    }
+
     while (Serial.available() > 0) {
         char command = Serial.read();
 
@@ -48,4 +66,6 @@ void loop() {
         }
         Serial.flush();
     }
+
+    delay(1);
 }
