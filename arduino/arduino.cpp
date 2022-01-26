@@ -1,13 +1,26 @@
 #include "../common.h"
+#include <EEPROM.h>
+#include <Arduino.h>
 
-BATTERY_DATA_T charge_now = 6000000; // TODO: store periodically on EEPROM
+constexpr BATTERY_DATA_T MAX_CHARGE = 6000000;
+
+BATTERY_DATA_T charge_now = MAX_CHARGE;
+BATTERY_DATA_T saved_charge = MAX_CHARGE;
+
 BATTERY_DATA_T voltage_now = 15000000;
 BATTERY_DATA_T current_now = 3000000;
 
 unsigned long lastTime = 0;
 
 void setup() {
+    pinMode(2, INPUT);
+    if (digitalRead(2)) {
+        EEPROM.put(0, MAX_CHARGE);
+    }
     Serial.begin(9600);
+    EEPROM.get(0, saved_charge);
+    //Serial.print("Saved charge: ");
+    //Serial.println(saved_charge);
 }
 
 void writeData(BATTERY_DATA_T data) {
@@ -45,6 +58,13 @@ void loop() {
         Serial.println(current_now * ((now - lastTime) / 3600000000.0));
 */
         lastTime = now;
+    }
+
+    if (saved_charge - charge_now > 9000) {
+        //Serial.print(charge_now);
+        //Serial.println(" Saving to eeprom");
+        EEPROM.put(0, charge_now);
+        saved_charge = charge_now;
     }
 
     while (Serial.available() > 0) {

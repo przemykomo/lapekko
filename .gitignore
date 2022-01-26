@@ -8,3 +8,7 @@ compile_commands.json
 *.mod.c
 *.o
 arduino/preprocessed/
+*.d
+*.eep
+*.elf
+*.hex
