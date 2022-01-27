@@ -2,7 +2,7 @@
 #include <EEPROM.h>
 #include <Arduino.h>
 
-constexpr BATTERY_DATA_T MAX_CHARGE = 6000000;
+constexpr BATTERY_DATA_T MAX_CHARGE = BATTERY_MAX_CHARGE;
 
 BATTERY_DATA_T charge_now = MAX_CHARGE;
 BATTERY_DATA_T saved_charge = MAX_CHARGE;
@@ -72,9 +72,6 @@ void loop() {
 
         switch (command) {
         case BATTERY_CMD_CHARGE_NOW:
-            writeData(charge_now);
-            break;
-        case BATTERY_CMD_CHARGE_COUNTER: //TODO: remove I think
             writeData(charge_now);
             break;
         case BATTERY_CMD_VOLTAGE_NOW:

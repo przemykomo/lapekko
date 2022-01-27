@@ -77,7 +77,6 @@ static enum power_supply_property lapekko_power_battery_props[] = {
     POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
     POWER_SUPPLY_PROP_CHARGE_FULL,
     POWER_SUPPLY_PROP_CHARGE_NOW,
-    POWER_SUPPLY_PROP_CHARGE_COUNTER,
     POWER_SUPPLY_PROP_CAPACITY,
     POWER_SUPPLY_PROP_CAPACITY_LEVEL,
     POWER_SUPPLY_PROP_MODEL_NAME,
@@ -180,8 +179,8 @@ static int arduino_probe(struct usb_interface *interface,
         return -1;
     }
 
-
-// arduino nano clone code, some based of on https://github.com/torvalds/linux/blob/master/drivers/usb/serial/ch341.c
+// arduino nano clone code, some based of on
+// https://github.com/torvalds/linux/blob/master/drivers/usb/serial/ch341.c
 // TODO: clean this up, check and remove what's not needed
 #ifdef ARDUINO_NANO
 
@@ -310,13 +309,11 @@ static int arduino_probe(struct usb_interface *interface,
     }
     pr_info("Chip status: 0x%02x\n", buffer[0]);
 
-
     // set handshake 3 but different for some reason
     retval = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0),
                              CH341_REQ_MODEM_CTRL,
                              USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
-                             0xff9f,
-                             0, NULL, 0, DEFAULT_TIMEOUT);
+                             0xff9f, 0, NULL, 0, DEFAULT_TIMEOUT);
 
     if (retval < 0) {
         pr_err("Error: Control commands(CH341_REQ_MODEM_CTRL v3) could not be "
@@ -440,7 +437,9 @@ static int lapekko_power_get_battery_property(struct power_supply *psy,
         val->strval = "Pekkorp";
         break;
     case POWER_SUPPLY_PROP_STATUS:
-        val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+        val->intval =
+            POWER_SUPPLY_STATUS_DISCHARGING; // It can't charge during usage so
+                                             // it's hardcoded.
         break;
     case POWER_SUPPLY_PROP_HEALTH:
         val->intval = POWER_SUPPLY_HEALTH_UNKNOWN;
@@ -451,19 +450,38 @@ static int lapekko_power_get_battery_property(struct power_supply *psy,
     case POWER_SUPPLY_PROP_TECHNOLOGY:
         val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
         break;
-    case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
-        val->intval = POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
+    case POWER_SUPPLY_PROP_CAPACITY_LEVEL: {
+
+        BATTERY_DATA_T charge_now =
+            get_value_from_arduino(BATTERY_CMD_CHARGE_NOW);
+        int percents = charge_now * 100 / BATTERY_MAX_CHARGE;
+
+        if (percents < 5) {
+            val->intval = POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL;
+        } else if (percents < 25) {
+            val->intval = POWER_SUPPLY_CAPACITY_LEVEL_LOW;
+        } else if (percents < 75) {
+            val->intval = POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
+        } else if (percents < 99) {
+            val->intval = POWER_SUPPLY_CAPACITY_LEVEL_HIGH;
+        } else {
+            val->intval = POWER_SUPPLY_CAPACITY_LEVEL_FULL;
+        }
+
         break;
-    case POWER_SUPPLY_PROP_CAPACITY:
+    }
+    case POWER_SUPPLY_PROP_CAPACITY: {
+        BATTERY_DATA_T charge_now =
+            get_value_from_arduino(BATTERY_CMD_CHARGE_NOW);
+        val->intval = charge_now * 100 / BATTERY_MAX_CHARGE;
+        break;
+    }
     case POWER_SUPPLY_PROP_CHARGE_NOW:
         val->intval = get_value_from_arduino(BATTERY_CMD_CHARGE_NOW);
         break;
-    case POWER_SUPPLY_PROP_CHARGE_COUNTER:
-        val->intval = get_value_from_arduino(BATTERY_CMD_CHARGE_COUNTER);
-        break;
     case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
     case POWER_SUPPLY_PROP_CHARGE_FULL:
-        val->intval = 100;
+        val->intval = BATTERY_MAX_CHARGE;
         break;
     case POWER_SUPPLY_PROP_VOLTAGE_NOW:
         val->intval = get_value_from_arduino(BATTERY_CMD_VOLTAGE_NOW);
