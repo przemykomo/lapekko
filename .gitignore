@@ -12,3 +12,5 @@ arduino/preprocessed/
 *.eep
 *.elf
 *.hex
+
+circuit/coulomb_counter/coulomb_counter-backups/
